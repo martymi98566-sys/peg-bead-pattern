@@ -36,10 +36,10 @@
       <label for="file">图片</label><input id="file" type="file" accept="image/*" />
       <label>成品尺寸（m × n）</label>
       <div class="dimensions"><input id="cols" type="number" min="1" max="200" value="30" aria-label="横向 m" /><b class="times">×</b><input id="rows" type="number" min="1" max="200" value="30" aria-label="纵向 n" /></div>
-      <label for="palette">颜色数量</label><select id="palette"><option value="8">8 色</option><option value="12" selected>12 色</option><option value="16">16 色</option><option value="24">24 色</option><option value="32">32 色</option></select>
-      <div class="checks"><label><input id="grid" type="checkbox" checked /> 显示网格线</label><label><input id="symbols" type="checkbox" /> 显示色号（图纸较小时）</label></div>
+      <label for="palette">最多使用 MARD 色号</label><select id="palette"><option value="8">8 色</option><option value="12" selected>12 色</option><option value="16">16 色</option><option value="24">24 色</option><option value="32">32 色</option></select>
+      <div class="checks"><label><input id="grid" type="checkbox" checked /> 显示网格线</label><label><input id="symbols" type="checkbox" checked /> 显示 MARD 色号（图纸较小时）</label></div>
       <button id="generate" class="primary">生成图纸</button>
-      <p class="hint">m 为横向豆子数，n 为纵向豆子数。图纸会自动裁切并缩放原图以填满该比例。</p>
+      <p class="hint">m 为横向豆子数，n 为纵向豆子数。颜色会匹配到 MARD 221 标准实体色号；屏幕色仅供参考。</p>
     </aside>
     <section class="card">
       <div id="empty" class="empty"><div><h2>等待上传图片</h2><p>选择一张 JPG、PNG、WebP 或 GIF 图片开始。</p></div></div>
@@ -53,6 +53,19 @@
     const $ = id => document.getElementById(id); let source = null, last = null;
     const clamp = (v,a,b) => Math.max(a,Math.min(b,v));
     function readSettings() { return { cols:clamp(+$('cols').value||30,1,200), rows:clamp(+$('rows').value||30,1,200), count:+$('palette').value, grid:$('grid').checked, symbols:$('symbols').checked }; }
+    // MARD 221 standard palette: A–H and M series. HEX is a screen reference;
+    // the code is the one used when buying and placing real beads.
+    const MARD221=Object.entries({
+      A:'FAF4C8,FFFFD5,FEFF8B,FBED56,F4D738,FEAC4C,FE8B4C,FFDA45,FF995B,F77C31,FFDD99,FE9F72,FFC365,FD543D,FFF365,FFFF9F,FFE36E,FEBE7D,FD7C72,FFD568,FFE395,F4F57D,E6C9B7,F7F8A2,FFD67D,FFC830',
+      B:'E6EE31,63F347,9EF780,5DE035,35E352,65E2A6,3DAF80,1C9C4F,27523A,95D3C2,5D722A,166F41,CAEB7B,ADE946,2E5132,C5ED9C,9BB13A,E6EE49,24B88C,C2F0CC,156A6B,0B3C43,303A21,EEFCA5,4E846D,8D7A35,CCE1AF,9EE5B9,C5E254,E2FCB1,B0E792,9CAB5A',
+      C:'E8FFE7,A9F9FC,A0E2FB,41CCFF,01ACEB,50AAF0,3677D2,0F54C0,324BCA,3EBCE2,28DDDE,1C334D,CDE8FF,D5FDFF,22C4C6,1557A8,04D1F6,1D3344,1887A2,176DAF,BEDDFF,67B4BE,C8E2FF,7CC4FF,A9E5E5,3CAED8,D3DFFA,BBCFED,34488E',
+      D:'AEB4F2,858EDD,2F54AF,182A84,B843C5,AC7BDE,8854B3,E2D3FF,D5B9F8,361851,B9BAE1,DE9AD4,B90095,8B279B,2F1F90,E3E1EE,C4D4F6,A45EC7,D8C3D7,9C32B2,9A009B,333A95,EBDAFC,7786E5,494FC7,DFC2F8',
+      E:'FDD3CC,FEC0DF,FFB7E7,E8649E,F551A2,F13D74,C63478,FFDBE9,E970CC,D33793,FCDDD2,F78FC3,B5006D,FFD1BA,F8C7C9,FFF3EB,FFE2EA,FFC7DB,FEBAD5,D8C7D1,BD9DA1,B785A1,937A8D,E1BCE8',
+      F:'FD957B,FC3D46,F74941,FC283C,E7002F,943630,971937,BC0028,E2677A,8A4526,5A2121,FD4E6A,F35744,FFA9AD,D30022,FEC2A6,E69C79,D37C46,C1444A,CD9391,F7B4C6,FDC0D0,F67E66,E698AA,E54B4F',
+      G:'FFE2CE,FFC4AA,F4C3A5,E1B383,EDB045,E99C17,9D5B3E,753832,E6B483,D98C39,E0C593,FFC890,B7714A,8D614C,FCF9E0,F2D9BA,78524B,FFE4CC,E07935,A94023,B88558',
+      H:'FDFBFF,FEFFFF,B6B1BA,89858C,48464E,2F2B2F,000000,E7D6DB,EDEDED,EEE9EA,CECDD5,FFF5ED,F5ECD2,CFD7D3,98A6A8,1D1414,F1EDED,FFFDF0,F6EFE2,949FA3,FFFBE1,CACAD4,9A9D94',
+      M:'BCC6B8,8AA386,697D80,E3D2BC,D0CCAA,B0A782,B4A497,B38281,A58767,C5B2BC,9F7594,644749,D19066,C77362,757D78'
+    }).flatMap(([series,hexes])=>hexes.split(',').map((v,i)=>({code:`${series}${i+1}`,hex:`#${v}`,rgb:[parseInt(v.slice(0,2),16),parseInt(v.slice(2,4),16),parseInt(v.slice(4,6),16)]})));
     function rgbName([r,g,b]) { return `RGB(${r}, ${g}, ${b})`; }
     // Median-cut quantization: turns arbitrary source pixels into a compact, reproducible palette.
     function medianCut(pixels, wanted) {
@@ -63,19 +76,26 @@
         const box=boxes.splice(bi,1)[0], ranges=[0,1,2].map(k=>Math.max(...box.map(p=>p[k]))-Math.min(...box.map(p=>p[k]))), channel=ranges.indexOf(Math.max(...ranges)); box.sort((a,b)=>a[channel]-b[channel]); const mid=Math.floor(box.length/2); boxes.push(box.slice(0,mid),box.slice(mid)); }
       return boxes.map(box=>[0,1,2].map(k=>Math.round(box.reduce((s,p)=>s+p[k],0)/box.length)));
     }
-    function nearest(c,palette) { let best=0, d=Infinity; palette.forEach((p,i)=>{const n=(c[0]-p[0])**2+(c[1]-p[1])**2+(c[2]-p[2])**2;if(n<d){d=n;best=i;}});return best; }
+    function nearest(c,palette) { let best=0, d=Infinity; palette.forEach((p,i)=>{const rgb=p.rgb||p, n=(c[0]-rgb[0])**2+(c[1]-rgb[1])**2+(c[2]-rgb[2])**2;if(n<d){d=n;best=i;}});return best; }
+    function pickMardPalette(pixels,wanted) {
+      // First describe the image with median-cut, then snap each description to
+      // a real MARD bead. Using more candidates prevents duplicate MARD codes.
+      const candidates=medianCut(pixels,Math.min(pixels.length,wanted*4)), chosen=[];
+      for(const color of candidates) { const bead=MARD221[nearest(color,MARD221)]; if(!chosen.some(x=>x.code===bead.code)) chosen.push(bead); if(chosen.length===wanted) break; }
+      return chosen;
+    }
     function makePattern() {
       if(!source) return alert('请先上传一张图片。'); const s=readSettings(); $('cols').value=s.cols; $('rows').value=s.rows;
       const small=document.createElement('canvas'); small.width=s.cols; small.height=s.rows; const x=small.getContext('2d');
       const scale=Math.max(s.cols/source.width,s.rows/source.height), w=source.width*scale, h=source.height*scale; x.drawImage(source,(s.cols-w)/2,(s.rows-h)/2,w,h);
       const raw=x.getImageData(0,0,s.cols,s.rows).data, pixels=[]; for(let i=0;i<raw.length;i+=4) pixels.push([raw[i],raw[i+1],raw[i+2]]);
-      const palette=medianCut(pixels,s.count), cells=pixels.map(p=>nearest(p,palette)); last={s,palette,cells}; draw();
+      const palette=pickMardPalette(pixels,s.count), cells=pixels.map(p=>nearest(p,palette)); last={s,palette,cells}; draw();
     }
     function draw() { if(!last)return; const {s,palette,cells}=last, cell=clamp(Math.floor(720/Math.max(s.cols,s.rows)),10,28), c=$('canvas'), ctx=c.getContext('2d'); c.width=s.cols*cell; c.height=s.rows*cell; ctx.imageSmoothingEnabled=false;
-      for(let y=0;y<s.rows;y++) for(let x=0;x<s.cols;x++){ const i=cells[y*s.cols+x], p=palette[i]; ctx.fillStyle=`rgb(${p})`;ctx.fillRect(x*cell,y*cell,cell,cell); if(s.symbols && cell>=13){ctx.fillStyle=(p[0]*.299+p[1]*.587+p[2]*.114)>145?'#111':'#fff';ctx.font=`${Math.max(8,cell*.45)}px sans-serif`;ctx.textAlign='center';ctx.textBaseline='middle';ctx.fillText(i+1,x*cell+cell/2,y*cell+cell/2);} }
+      for(let y=0;y<s.rows;y++) for(let x=0;x<s.cols;x++){ const i=cells[y*s.cols+x], p=palette[i], rgb=p.rgb; ctx.fillStyle=p.hex;ctx.fillRect(x*cell,y*cell,cell,cell); if(s.symbols && cell>=13){ctx.fillStyle=(rgb[0]*.299+rgb[1]*.587+rgb[2]*.114)>145?'#111':'#fff';ctx.font=`bold ${Math.max(8,cell*.42)}px sans-serif`;ctx.textAlign='center';ctx.textBaseline='middle';ctx.fillText(p.code,x*cell+cell/2,y*cell+cell/2);} }
       if(s.grid){ctx.strokeStyle='rgba(20,25,35,.45)';ctx.lineWidth=1;ctx.beginPath();for(let x=0;x<=s.cols;x++){ctx.moveTo(x*cell+.5,0);ctx.lineTo(x*cell+.5,c.height)}for(let y=0;y<=s.rows;y++){ctx.moveTo(0,y*cell+.5);ctx.lineTo(c.width,y*cell+.5)}ctx.stroke();}
-      const counts=palette.map((_,i)=>cells.filter(v=>v===i).length); $('summary').textContent=`${s.cols} × ${s.rows} 格 · 共 ${s.cols*s.rows} 颗拼豆 · 实际使用 ${counts.filter(Boolean).length} 种颜色`;
-      $('legend').innerHTML=palette.map((p,i)=>counts[i]?`<div class="swatch"><i class="dot" style="background:rgb(${p})"></i><span>${i+1}. ${rgbName(p)} · ${counts[i]} 颗</span></div>`:'').join(''); $('empty').hidden=true;$('result').hidden=false;
+      const counts=palette.map((_,i)=>cells.filter(v=>v===i).length); $('summary').textContent=`${s.cols} × ${s.rows} 格 · 共 ${s.cols*s.rows} 颗拼豆 · MARD 221 实际使用 ${counts.filter(Boolean).length} 个色号`;
+      $('legend').innerHTML=palette.map((p,i)=>counts[i]?`<div class="swatch"><i class="dot" style="background:${p.hex}"></i><span>${p.code} · ${counts[i]} 颗 · ${p.hex}</span></div>`:'').join(''); $('empty').hidden=true;$('result').hidden=false;
     }
     $('file').addEventListener('change',e=>{const f=e.target.files[0];if(!f)return;const url=URL.createObjectURL(f);source=new Image();source.onload=()=>{URL.revokeObjectURL(url);makePattern()};source.src=url;});
     $('generate').onclick=makePattern; ['grid','symbols'].forEach(id=>$(id).onchange=draw);
