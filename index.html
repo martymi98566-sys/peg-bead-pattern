@@ -39,7 +39,7 @@
       <label for="palette">最多使用 MARD 色号</label><select id="palette"><option value="8">8 色</option><option value="12" selected>12 色</option><option value="16">16 色</option><option value="24">24 色</option><option value="32">32 色</option></select>
       <div class="checks"><label><input id="grid" type="checkbox" checked /> 显示网格线</label><label><input id="symbols" type="checkbox" checked /> 显示 MARD 色号（图纸较小时）</label></div>
       <button id="generate" class="primary">生成图纸</button>
-      <p class="hint">m 为横向豆子数，n 为纵向豆子数。颜色会匹配到 MARD 221 标准实体色号；屏幕色仅供参考。</p>
+      <p class="hint">m 为横向豆子数，n 为纵向豆子数。每格会以原图区域内票数最多的 MARD 色号决定颜色，不使用平均混色。</p>
     </aside>
     <section class="card">
       <div id="empty" class="empty"><div><h2>等待上传图片</h2><p>选择一张 JPG、PNG、WebP 或 GIF 图片开始。</p></div></div>
@@ -67,29 +67,36 @@
       M:'BCC6B8,8AA386,697D80,E3D2BC,D0CCAA,B0A782,B4A497,B38281,A58767,C5B2BC,9F7594,644749,D19066,C77362,757D78'
     }).flatMap(([series,hexes])=>hexes.split(',').map((v,i)=>({code:`${series}${i+1}`,hex:`#${v}`,rgb:[parseInt(v.slice(0,2),16),parseInt(v.slice(2,4),16),parseInt(v.slice(4,6),16)]})));
     function rgbName([r,g,b]) { return `RGB(${r}, ${g}, ${b})`; }
-    // Median-cut quantization: turns arbitrary source pixels into a compact, reproducible palette.
-    function medianCut(pixels, wanted) {
-      // `sort()` mutates its array. Work on a shallow copy so that `pixels`
-      // still retains the original left-to-right, top-to-bottom image layout.
-      let boxes=[pixels.slice()];
-      while(boxes.length<wanted) { let bi=-1, score=-1; boxes.forEach((box,i)=>{ if(box.length<2)return; let range=Math.max(...[0,1,2].map(k=>Math.max(...box.map(p=>p[k]))-Math.min(...box.map(p=>p[k])))); if(range>score){score=range;bi=i;} }); if(bi<0) break;
-        const box=boxes.splice(bi,1)[0], ranges=[0,1,2].map(k=>Math.max(...box.map(p=>p[k]))-Math.min(...box.map(p=>p[k]))), channel=ranges.indexOf(Math.max(...ranges)); box.sort((a,b)=>a[channel]-b[channel]); const mid=Math.floor(box.length/2); boxes.push(box.slice(0,mid),box.slice(mid)); }
-      return boxes.map(box=>[0,1,2].map(k=>Math.round(box.reduce((s,p)=>s+p[k],0)/box.length)));
-    }
     function nearest(c,palette) { let best=0, d=Infinity; palette.forEach((p,i)=>{const rgb=p.rgb||p, n=(c[0]-rgb[0])**2+(c[1]-rgb[1])**2+(c[2]-rgb[2])**2;if(n<d){d=n;best=i;}});return best; }
-    function pickMardPalette(pixels,wanted) {
-      // First describe the image with median-cut, then snap each description to
-      // a real MARD bead. Using more candidates prevents duplicate MARD codes.
-      const candidates=medianCut(pixels,Math.min(pixels.length,wanted*4)), chosen=[];
-      for(const color of candidates) { const bead=MARD221[nearest(color,MARD221)]; if(!chosen.some(x=>x.code===bead.code)) chosen.push(bead); if(chosen.length===wanted) break; }
-      return chosen;
+    function voteMardColors(s) {
+      // Render a small block of source samples for every output cell. We then
+      // vote on real MARD codes per cell, instead of averaging blue/white/skin
+      // pixels into a synthetic grey colour.
+      const samples=Math.max(2,Math.min(12,Math.floor(Math.sqrt(180000/(s.cols*s.rows)))))||2;
+      const detail=document.createElement('canvas'); detail.width=s.cols*samples; detail.height=s.rows*samples;
+      const ctx=detail.getContext('2d'); ctx.imageSmoothingEnabled=false;
+      const scale=Math.max(detail.width/source.width,detail.height/source.height), w=source.width*scale, h=source.height*scale;
+      ctx.drawImage(source,(detail.width-w)/2,(detail.height-h)/2,w,h);
+      const raw=ctx.getImageData(0,0,detail.width,detail.height).data, nearestCache=new Map(), globalVotes=Array(MARD221.length).fill(0), cellVotes=[];
+      const classify=(r,g,b)=>{const key=(r<<16)|(g<<8)|b; if(!nearestCache.has(key)) nearestCache.set(key,nearest([r,g,b],MARD221)); return nearestCache.get(key);};
+      for(let y=0;y<s.rows;y++) for(let x=0;x<s.cols;x++) { const votes=new Map();
+        for(let dy=0;dy<samples;dy++) for(let dx=0;dx<samples;dx++) { const pos=4*((y*samples+dy)*detail.width+x*samples+dx), code=classify(raw[pos],raw[pos+1],raw[pos+2]); votes.set(code,(votes.get(code)||0)+1); globalVotes[code]++; }
+        cellVotes.push(votes);
+      }
+      // The color limit is also frequency based: retain the real MARD codes
+      // seen most often in the image, rather than arbitrary median-cut boxes.
+      const chosenIndexes=globalVotes.map((votes,index)=>({index,votes})).sort((a,b)=>b.votes-a.votes).slice(0,s.count).map(x=>x.index), palette=chosenIndexes.map(i=>MARD221[i]), paletteIndex=new Map(chosenIndexes.map((v,i)=>[v,i]));
+      const cells=cellVotes.map(votes=>{ let best=-1, bestVotes=-1; votes.forEach((n,index)=>{if(paletteIndex.has(index)&&n>bestVotes){best=index;bestVotes=n;}});
+        if(best>=0) return paletteIndex.get(best);
+        // A rare-color-only cell has no allowed code. Remap its dominant real
+        // MARD code to the selected palette; no RGB averaging is introduced.
+        let dominant=0, count=-1; votes.forEach((n,index)=>{if(n>count){dominant=index;count=n;}}); return nearest(MARD221[dominant].rgb,palette);
+      });
+      return {palette,cells};
     }
     function makePattern() {
       if(!source) return alert('请先上传一张图片。'); const s=readSettings(); $('cols').value=s.cols; $('rows').value=s.rows;
-      const small=document.createElement('canvas'); small.width=s.cols; small.height=s.rows; const x=small.getContext('2d');
-      const scale=Math.max(s.cols/source.width,s.rows/source.height), w=source.width*scale, h=source.height*scale; x.drawImage(source,(s.cols-w)/2,(s.rows-h)/2,w,h);
-      const raw=x.getImageData(0,0,s.cols,s.rows).data, pixels=[]; for(let i=0;i<raw.length;i+=4) pixels.push([raw[i],raw[i+1],raw[i+2]]);
-      const palette=pickMardPalette(pixels,s.count), cells=pixels.map(p=>nearest(p,palette)); last={s,palette,cells}; draw();
+      const {palette,cells}=voteMardColors(s); last={s,palette,cells}; draw();
     }
     function draw() { if(!last)return; const {s,palette,cells}=last, cell=clamp(Math.floor(720/Math.max(s.cols,s.rows)),10,28), c=$('canvas'), ctx=c.getContext('2d'); c.width=s.cols*cell; c.height=s.rows*cell; ctx.imageSmoothingEnabled=false;
       for(let y=0;y<s.rows;y++) for(let x=0;x<s.cols;x++){ const i=cells[y*s.cols+x], p=palette[i], rgb=p.rgb; ctx.fillStyle=p.hex;ctx.fillRect(x*cell,y*cell,cell,cell); if(s.symbols && cell>=13){ctx.fillStyle=(rgb[0]*.299+rgb[1]*.587+rgb[2]*.114)>145?'#111':'#fff';ctx.font=`bold ${Math.max(8,cell*.42)}px sans-serif`;ctx.textAlign='center';ctx.textBaseline='middle';ctx.fillText(p.code,x*cell+cell/2,y*cell+cell/2);} }
