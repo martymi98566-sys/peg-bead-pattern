@@ -36,7 +36,7 @@
       <label for="file">图片</label><input id="file" type="file" accept="image/*" />
       <label>成品尺寸（m × n）</label>
       <div class="dimensions"><input id="cols" type="number" min="1" max="200" value="30" aria-label="横向 m" /><b class="times">×</b><input id="rows" type="number" min="1" max="200" value="30" aria-label="纵向 n" /></div>
-      <label>颜色方案</label><div class="hint" style="margin-top:0">本地智能净色（自动决定 MARD 色号数量）</div>
+      <label for="palette">最多使用 MARD 色号</label><select id="palette"><option value="8">8 色</option><option value="12" selected>12 色</option><option value="16">16 色</option><option value="24">24 色</option><option value="32">32 色</option></select>
       <div class="checks"><label><input id="grid" type="checkbox" checked /> 显示网格线</label><label><input id="symbols" type="checkbox" checked /> 显示 MARD 色号（图纸较小时）</label></div>
       <button id="generate" class="primary">生成图纸</button>
       <p class="hint">m 为横向豆子数，n 为纵向豆子数。每格会以原图区域内票数最多的 MARD 色号决定颜色，不使用平均混色。</p>
@@ -52,7 +52,7 @@
   <script>
     const $ = id => document.getElementById(id); let source = null, last = null;
     const clamp = (v,a,b) => Math.max(a,Math.min(b,v));
-    function readSettings() { return { cols:clamp(+$('cols').value||30,1,200), rows:clamp(+$('rows').value||30,1,200), grid:$('grid').checked, symbols:$('symbols').checked }; }
+    function readSettings() { return { cols:clamp(+$('cols').value||30,1,200), rows:clamp(+$('rows').value||30,1,200), count:+$('palette').value, grid:$('grid').checked, symbols:$('symbols').checked }; }
     // MARD 221 standard palette: A–H and M series. HEX is a screen reference;
     // the code is the one used when buying and placing real beads.
     function toHsl([r,g,b]) { r/=255;g/=255;b/=255; const max=Math.max(r,g,b),min=Math.min(r,g,b),l=(max+min)/2,delta=max-min; if(!delta)return [0,0,l]; let h=max===r?(g-b)/delta+(g<b?6:0):max===g?(b-r)/delta+2:(r-g)/delta+4; return [h/6,delta/(1-Math.abs(2*l-1)),l]; }
@@ -77,24 +77,6 @@
         if(sourceHsl[1]>.14) { const hue=Math.min(Math.abs(sourceHsl[0]-targetHsl[0]),1-Math.abs(sourceHsl[0]-targetHsl[0])); n+=42000*(sourceHsl[1]-targetHsl[1])**2+360000*hue**2*(.5+sourceHsl[1]); }
         if(n<d){d=n;best=i;} }); return best;
     }
-    function autoPaletteIndexes(globalVotes) {
-      const ranked=globalVotes.map((votes,index)=>({index,votes})).sort((a,b)=>b.votes-a.votes), total=globalVotes.reduce((a,b)=>a+b,0); let running=0, count=0;
-      // Keep enough real colors to explain 90% of the source area, but avoid
-      // turning JPEG/anti-aliasing variations into a long material list.
-      for(const item of ranked) { running+=item.votes; count++; if(running>=total*.90) break; }
-      return ranked.slice(0,clamp(count,5,12)).map(item=>item.index);
-    }
-    function cleanSmallRegions(cells,cols,rows) {
-      let out=cells.slice(), changed=true, passes=0, minSize=Math.max(2,Math.round(cols*rows*.003));
-      const adjacent=i=>{const x=i%cols,y=Math.floor(i/cols),a=[]; for(let dy=-1;dy<=1;dy++)for(let dx=-1;dx<=1;dx++)if(dx||dy){const nx=x+dx,ny=y+dy;if(nx>=0&&nx<cols&&ny>=0&&ny<rows)a.push(ny*cols+nx);}return a;};
-      while(changed && passes++<3) { changed=false; const seen=new Set(), next=out.slice();
-        for(let start=0;start<out.length;start++) { if(seen.has(start))continue; const color=out[start], region=[], queue=[start]; seen.add(start); const border=new Map();
-          while(queue.length) { const i=queue.pop(); region.push(i); for(const n of adjacent(i)) { if(out[n]===color&&!seen.has(n)){seen.add(n);queue.push(n);} else if(out[n]!==color) border.set(out[n],(border.get(out[n])||0)+1); } }
-          if(region.length<minSize && border.size) { let replacement=color,largest=-1; border.forEach((n,c)=>{if(n>largest){largest=n;replacement=c;}}); region.forEach(i=>next[i]=replacement); changed=true; }
-        } out=next;
-      }
-      return out;
-    }
     function voteMardColors(s) {
       // Render a small block of source samples for every output cell. We then
       // vote on real MARD codes per cell, instead of averaging blue/white/skin
@@ -110,11 +92,16 @@
         for(let dy=0;dy<samples;dy++) for(let dx=0;dx<samples;dx++) { const pos=4*((y*samples+dy)*detail.width+x*samples+dx), code=classify(raw[pos],raw[pos+1],raw[pos+2]); votes.set(code,(votes.get(code)||0)+1); globalVotes[code]++; }
         cellVotes.push(votes);
       }
-      const chosenIndexes=autoPaletteIndexes(globalVotes), palette=chosenIndexes.map(i=>MARD221[i]), paletteIndex=new Map(chosenIndexes.map((v,i)=>[v,i]));
-      // Every source sample votes after being mapped to the selected palette.
-      // This keeps broad regions coherent while never constructing an average RGB.
-      const cells=cellVotes.map(votes=>{ const outputVotes=Array(palette.length).fill(0); votes.forEach((n,index)=>{const target=paletteIndex.has(index)?paletteIndex.get(index):nearest(MARD221[index].rgb,palette);outputVotes[target]+=n;}); return outputVotes.indexOf(Math.max(...outputVotes)); });
-      return {palette,cells:cleanSmallRegions(cells,s.cols,s.rows)};
+      // The color limit is also frequency based: retain the real MARD codes
+      // seen most often in the image, rather than arbitrary median-cut boxes.
+      const chosenIndexes=globalVotes.map((votes,index)=>({index,votes})).sort((a,b)=>b.votes-a.votes).slice(0,s.count).map(x=>x.index), palette=chosenIndexes.map(i=>MARD221[i]), paletteIndex=new Map(chosenIndexes.map((v,i)=>[v,i]));
+      const cells=cellVotes.map(votes=>{ let best=-1, bestVotes=-1; votes.forEach((n,index)=>{if(paletteIndex.has(index)&&n>bestVotes){best=index;bestVotes=n;}});
+        if(best>=0) return paletteIndex.get(best);
+        // A rare-color-only cell has no allowed code. Remap its dominant real
+        // MARD code to the selected palette; no RGB averaging is introduced.
+        let dominant=0, count=-1; votes.forEach((n,index)=>{if(n>count){dominant=index;count=n;}}); return nearest(MARD221[dominant].rgb,palette);
+      });
+      return {palette,cells};
     }
     function makePattern() {
       if(!source) return alert('请先上传一张图片。'); const s=readSettings(); $('cols').value=s.cols; $('rows').value=s.rows;
