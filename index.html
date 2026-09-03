@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>拼豆图纸生成器</title>
+  <style>
+    :root { color-scheme: light; --ink:#202531; --muted:#667085; --line:#d7dce5; --panel:#fff; --accent:#2563eb; }
+    * { box-sizing:border-box; }
+    body { margin:0; min-width:320px; background:#f3f5f9; color:var(--ink); font:15px/1.45 system-ui,"Microsoft YaHei",sans-serif; }
+    header { padding:26px max(24px, calc((100vw - 1200px)/2)); background:linear-gradient(120deg,#172554,#2563eb); color:#fff; }
+    h1 { margin:0; font-size:27px; } header p { margin:5px 0 0; opacity:.88; }
+    main { max-width:1200px; margin:24px auto; padding:0 20px; display:grid; grid-template-columns:300px 1fr; gap:20px; }
+    .card { background:var(--panel); border:1px solid #e4e7ec; border-radius:14px; box-shadow:0 2px 8px #1018280a; }
+    aside { padding:18px; align-self:start; position:sticky; top:16px; }
+    h2 { font-size:16px; margin:0 0 13px; } label { display:block; margin:14px 0 5px; font-weight:650; }
+    input, select, button { font:inherit; } input[type=number], select { width:100%; padding:8px 9px; border:1px solid var(--line); border-radius:8px; background:#fff; }
+    input[type=file] { width:100%; font-size:13px; }
+    .dimensions { display:grid; grid-template-columns:1fr 20px 1fr; gap:7px; align-items:end; } .times { padding-bottom:9px; text-align:center; color:var(--muted); }
+    .checks { display:grid; gap:7px; margin-top:13px; } .checks label { margin:0; font-weight:400; display:flex; gap:8px; align-items:center; }
+    button { cursor:pointer; border:0; border-radius:8px; padding:10px 12px; font-weight:700; } button.primary { width:100%; margin-top:17px; background:var(--accent); color:#fff; } button.secondary { background:#e8eefc; color:#164bb2; }
+    .hint { margin:13px 0 0; color:var(--muted); font-size:13px; }
+    section.card { padding:18px; min-width:0; } .empty { min-height:530px; display:grid; place-items:center; text-align:center; color:var(--muted); }
+    #result[hidden], #empty[hidden] { display:none; } .toolbar { display:flex; justify-content:space-between; gap:10px; flex-wrap:wrap; margin-bottom:14px; align-items:center; }
+    #summary { color:var(--muted); } #canvasWrap { overflow:auto; max-height:65vh; border:1px solid var(--line); border-radius:9px; background:#fafafa; padding:12px; }
+    canvas { display:block; margin:auto; image-rendering:pixelated; background:#fff; } .legend { margin-top:16px; display:grid; grid-template-columns:repeat(auto-fill,minmax(155px,1fr)); gap:7px; }
+    .swatch { display:flex; align-items:center; gap:8px; min-width:0; } .dot { width:19px; height:19px; flex:none; border:1px solid #667085; border-radius:50%; } .swatch span { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+    @media (max-width:750px) { main { grid-template-columns:1fr; } aside { position:static; } .empty { min-height:250px; } }
+  </style>
+</head>
+<body>
+  <header><h1>拼豆图纸生成器</h1><p>上传图片，设置横向 m 与纵向 n，生成可打印的像素拼豆图纸。</p></header>
+  <main>
+    <aside class="card">
+      <h2>图纸设置</h2>
+      <label for="file">图片</label><input id="file" type="file" accept="image/*" />
+      <label>成品尺寸（m × n）</label>
+      <div class="dimensions"><input id="cols" type="number" min="1" max="200" value="30" aria-label="横向 m" /><b class="times">×</b><input id="rows" type="number" min="1" max="200" value="30" aria-label="纵向 n" /></div>
+      <label for="palette">颜色数量</label><select id="palette"><option value="8">8 色</option><option value="12" selected>12 色</option><option value="16">16 色</option><option value="24">24 色</option><option value="32">32 色</option></select>
+      <div class="checks"><label><input id="grid" type="checkbox" checked /> 显示网格线</label><label><input id="symbols" type="checkbox" /> 显示色号（图纸较小时）</label></div>
+      <button id="generate" class="primary">生成图纸</button>
+      <p class="hint">m 为横向豆子数，n 为纵向豆子数。图纸会自动裁切并缩放原图以填满该比例。</p>
+    </aside>
+    <section class="card">
+      <div id="empty" class="empty"><div><h2>等待上传图片</h2><p>选择一张 JPG、PNG、WebP 或 GIF 图片开始。</p></div></div>
+      <div id="result" hidden>
+        <div class="toolbar"><div><h2>生成结果</h2><div id="summary"></div></div><button id="download" class="secondary">下载 PNG 图纸</button></div>
+        <div id="canvasWrap"><canvas id="canvas"></canvas></div><div id="legend" class="legend"></div>
+      </div>
+    </section>
+  </main>
+  <script>
+    const $ = id => document.getElementById(id); let source = null, last = null;
+    const clamp = (v,a,b) => Math.max(a,Math.min(b,v));
+    function readSettings() { return { cols:clamp(+$('cols').value||30,1,200), rows:clamp(+$('rows').value||30,1,200), count:+$('palette').value, grid:$('grid').checked, symbols:$('symbols').checked }; }
+    function rgbName([r,g,b]) { return `RGB(${r}, ${g}, ${b})`; }
+    // Median-cut quantization: turns arbitrary source pixels into a compact, reproducible palette.
+    function medianCut(pixels, wanted) {
+      // `sort()` mutates its array. Work on a shallow copy so that `pixels`
+      // still retains the original left-to-right, top-to-bottom image layout.
+      let boxes=[pixels.slice()];
+      while(boxes.length<wanted) { let bi=-1, score=-1; boxes.forEach((box,i)=>{ if(box.length<2)return; let range=Math.max(...[0,1,2].map(k=>Math.max(...box.map(p=>p[k]))-Math.min(...box.map(p=>p[k])))); if(range>score){score=range;bi=i;} }); if(bi<0) break;
+        const box=boxes.splice(bi,1)[0], ranges=[0,1,2].map(k=>Math.max(...box.map(p=>p[k]))-Math.min(...box.map(p=>p[k]))), channel=ranges.indexOf(Math.max(...ranges)); box.sort((a,b)=>a[channel]-b[channel]); const mid=Math.floor(box.length/2); boxes.push(box.slice(0,mid),box.slice(mid)); }
+      return boxes.map(box=>[0,1,2].map(k=>Math.round(box.reduce((s,p)=>s+p[k],0)/box.length)));
+    }
+    function nearest(c,palette) { let best=0, d=Infinity; palette.forEach((p,i)=>{const n=(c[0]-p[0])**2+(c[1]-p[1])**2+(c[2]-p[2])**2;if(n<d){d=n;best=i;}});return best; }
+    function makePattern() {
+      if(!source) return alert('请先上传一张图片。'); const s=readSettings(); $('cols').value=s.cols; $('rows').value=s.rows;
+      const small=document.createElement('canvas'); small.width=s.cols; small.height=s.rows; const x=small.getContext('2d');
+      const scale=Math.max(s.cols/source.width,s.rows/source.height), w=source.width*scale, h=source.height*scale; x.drawImage(source,(s.cols-w)/2,(s.rows-h)/2,w,h);
+      const raw=x.getImageData(0,0,s.cols,s.rows).data, pixels=[]; for(let i=0;i<raw.length;i+=4) pixels.push([raw[i],raw[i+1],raw[i+2]]);
+      const palette=medianCut(pixels,s.count), cells=pixels.map(p=>nearest(p,palette)); last={s,palette,cells}; draw();
+    }
+    function draw() { if(!last)return; const {s,palette,cells}=last, cell=clamp(Math.floor(720/Math.max(s.cols,s.rows)),10,28), c=$('canvas'), ctx=c.getContext('2d'); c.width=s.cols*cell; c.height=s.rows*cell; ctx.imageSmoothingEnabled=false;
+      for(let y=0;y<s.rows;y++) for(let x=0;x<s.cols;x++){ const i=cells[y*s.cols+x], p=palette[i]; ctx.fillStyle=`rgb(${p})`;ctx.fillRect(x*cell,y*cell,cell,cell); if(s.symbols && cell>=13){ctx.fillStyle=(p[0]*.299+p[1]*.587+p[2]*.114)>145?'#111':'#fff';ctx.font=`${Math.max(8,cell*.45)}px sans-serif`;ctx.textAlign='center';ctx.textBaseline='middle';ctx.fillText(i+1,x*cell+cell/2,y*cell+cell/2);} }
+      if(s.grid){ctx.strokeStyle='rgba(20,25,35,.45)';ctx.lineWidth=1;ctx.beginPath();for(let x=0;x<=s.cols;x++){ctx.moveTo(x*cell+.5,0);ctx.lineTo(x*cell+.5,c.height)}for(let y=0;y<=s.rows;y++){ctx.moveTo(0,y*cell+.5);ctx.lineTo(c.width,y*cell+.5)}ctx.stroke();}
+      const counts=palette.map((_,i)=>cells.filter(v=>v===i).length); $('summary').textContent=`${s.cols} × ${s.rows} 格 · 共 ${s.cols*s.rows} 颗拼豆 · 实际使用 ${counts.filter(Boolean).length} 种颜色`;
+      $('legend').innerHTML=palette.map((p,i)=>counts[i]?`<div class="swatch"><i class="dot" style="background:rgb(${p})"></i><span>${i+1}. ${rgbName(p)} · ${counts[i]} 颗</span></div>`:'').join(''); $('empty').hidden=true;$('result').hidden=false;
+    }
+    $('file').addEventListener('change',e=>{const f=e.target.files[0];if(!f)return;const url=URL.createObjectURL(f);source=new Image();source.onload=()=>{URL.revokeObjectURL(url);makePattern()};source.src=url;});
+    $('generate').onclick=makePattern; ['grid','symbols'].forEach(id=>$(id).onchange=draw);
+    $('download').onclick=()=>{if(!last)return;const a=document.createElement('a');a.download=`拼豆图纸_${last.s.cols}x${last.s.rows}.png`;a.href=$('canvas').toDataURL('image/png');a.click();};
+  </script>
+</body>
+</html>
