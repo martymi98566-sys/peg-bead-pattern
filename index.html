@@ -55,6 +55,7 @@
     function readSettings() { return { cols:clamp(+$('cols').value||30,1,200), rows:clamp(+$('rows').value||30,1,200), count:+$('palette').value, grid:$('grid').checked, symbols:$('symbols').checked }; }
     // MARD 221 standard palette: A–H and M series. HEX is a screen reference;
     // the code is the one used when buying and placing real beads.
+    function toHsl([r,g,b]) { r/=255;g/=255;b/=255; const max=Math.max(r,g,b),min=Math.min(r,g,b),l=(max+min)/2,delta=max-min; if(!delta)return [0,0,l]; let h=max===r?(g-b)/delta+(g<b?6:0):max===g?(b-r)/delta+2:(r-g)/delta+4; return [h/6,delta/(1-Math.abs(2*l-1)),l]; }
     const MARD221=Object.entries({
       A:'FAF4C8,FFFFD5,FEFF8B,FBED56,F4D738,FEAC4C,FE8B4C,FFDA45,FF995B,F77C31,FFDD99,FE9F72,FFC365,FD543D,FFF365,FFFF9F,FFE36E,FEBE7D,FD7C72,FFD568,FFE395,F4F57D,E6C9B7,F7F8A2,FFD67D,FFC830',
       B:'E6EE31,63F347,9EF780,5DE035,35E352,65E2A6,3DAF80,1C9C4F,27523A,95D3C2,5D722A,166F41,CAEB7B,ADE946,2E5132,C5ED9C,9BB13A,E6EE49,24B88C,C2F0CC,156A6B,0B3C43,303A21,EEFCA5,4E846D,8D7A35,CCE1AF,9EE5B9,C5E254,E2FCB1,B0E792,9CAB5A',
@@ -65,9 +66,17 @@
       G:'FFE2CE,FFC4AA,F4C3A5,E1B383,EDB045,E99C17,9D5B3E,753832,E6B483,D98C39,E0C593,FFC890,B7714A,8D614C,FCF9E0,F2D9BA,78524B,FFE4CC,E07935,A94023,B88558',
       H:'FDFBFF,FEFFFF,B6B1BA,89858C,48464E,2F2B2F,000000,E7D6DB,EDEDED,EEE9EA,CECDD5,FFF5ED,F5ECD2,CFD7D3,98A6A8,1D1414,F1EDED,FFFDF0,F6EFE2,949FA3,FFFBE1,CACAD4,9A9D94',
       M:'BCC6B8,8AA386,697D80,E3D2BC,D0CCAA,B0A782,B4A497,B38281,A58767,C5B2BC,9F7594,644749,D19066,C77362,757D78'
-    }).flatMap(([series,hexes])=>hexes.split(',').map((v,i)=>({code:`${series}${i+1}`,hex:`#${v}`,rgb:[parseInt(v.slice(0,2),16),parseInt(v.slice(2,4),16),parseInt(v.slice(4,6),16)]})));
+    }).flatMap(([series,hexes])=>hexes.split(',').map((v,i)=>({code:`${series}${i+1}`,hex:`#${v}`,rgb:[parseInt(v.slice(0,2),16),parseInt(v.slice(2,4),16),parseInt(v.slice(4,6),16)]}))).map(bead=>({...bead,hsl:toHsl(bead.rgb)}));
     function rgbName([r,g,b]) { return `RGB(${r}, ${g}, ${b})`; }
-    function nearest(c,palette) { let best=0, d=Infinity; palette.forEach((p,i)=>{const rgb=p.rgb||p, n=(c[0]-rgb[0])**2+(c[1]-rgb[1])**2+(c[2]-rgb[2])**2;if(n<d){d=n;best=i;}});return best; }
+    function nearest(c,palette) {
+      // RGB alone maps medium blue to a similarly bright grey. For chromatic
+      // source pixels, add a strong hue/saturation cost to retain the intended
+      // color family; neutral source pixels still use ordinary RGB matching.
+      const sourceHsl=toHsl(c); let best=0, d=Infinity;
+      palette.forEach((p,i)=>{const rgb=p.rgb||p, targetHsl=p.hsl||toHsl(rgb), rgbDistance=(c[0]-rgb[0])**2+(c[1]-rgb[1])**2+(c[2]-rgb[2])**2; let n=rgbDistance;
+        if(sourceHsl[1]>.14) { const hue=Math.min(Math.abs(sourceHsl[0]-targetHsl[0]),1-Math.abs(sourceHsl[0]-targetHsl[0])); n+=42000*(sourceHsl[1]-targetHsl[1])**2+360000*hue**2*(.5+sourceHsl[1]); }
+        if(n<d){d=n;best=i;} }); return best;
+    }
     function voteMardColors(s) {
       // Render a small block of source samples for every output cell. We then
       // vote on real MARD codes per cell, instead of averaging blue/white/skin
