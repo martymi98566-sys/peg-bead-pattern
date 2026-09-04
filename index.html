@@ -37,8 +37,9 @@
       <label>成品尺寸（m × n）</label>
       <div class="dimensions"><input id="cols" type="number" min="1" max="200" value="30" aria-label="横向 m" /><b class="times">×</b><input id="rows" type="number" min="1" max="200" value="30" aria-label="纵向 n" /></div>
       <label for="palette">最多使用 MARD 色号</label><select id="palette"><option value="8">8 色</option><option value="12" selected>12 色</option><option value="16">16 色</option><option value="24">24 色</option><option value="32">32 色</option></select>
-      <div class="checks"><label><input id="grid" type="checkbox" checked /> 显示网格线</label><label>背景区域自动留空，不显示色号或计入拼豆数量</label></div>
+      <div class="checks"><label><input id="grid" type="checkbox" checked /> 显示网格线</label><label><input id="subjectMode" type="checkbox" checked /> AI 提取人物主体（测试）</label><label>背景区域自动留空，不显示色号或计入拼豆数量</label></div>
       <button id="generate" class="primary">生成图纸</button>
+      <p id="aiStatus" class="hint">首次启用 AI 会下载本地模型；图片不会上传。</p>
       <p class="hint">m 为横向豆子数，n 为纵向豆子数。每格会以原图区域内票数最多的 MARD 色号决定颜色，不使用平均混色。</p>
     </aside>
     <section class="card">
@@ -50,7 +51,7 @@
     </section>
   </main>
   <script>
-    const $ = id => document.getElementById(id); let source = null, last = null, zoom = 1;
+    const $ = id => document.getElementById(id); let source = null, sourceUrl = null, last = null, zoom = 1, subjectMask = null, segmenter = null;
     const clamp = (v,a,b) => Math.max(a,Math.min(b,v));
     function readSettings() { return { cols:clamp(+$('cols').value||30,1,200), rows:clamp(+$('rows').value||30,1,200), count:+$('palette').value, grid:$('grid').checked }; }
     // MARD 221 standard palette: A–H and M series. HEX is a screen reference;
@@ -86,6 +87,21 @@
       while(queue.length) { const i=queue.pop(),x=i%cols,y=Math.floor(i/cols); for(const [dx,dy] of [[1,0],[-1,0],[0,1],[0,-1]]) { const nx=x+dx,ny=y+dy,n=ny*cols+nx; if(nx>=0&&nx<cols&&ny>=0&&ny<rows&&!background[n]&&cells[n]===color){background[n]=true;queue.push(n);} } }
       return background;
     }
+    async function prepareSubjectMask() {
+      if(!$('subjectMode').checked) { subjectMask=null; $('aiStatus').textContent='已关闭 AI 主体提取，改用边缘背景识别。'; return false; }
+      if(subjectMask) return true;
+      const button=$('generate'); button.disabled=true; button.textContent='正在识别主体…';
+      try {
+        $('aiStatus').textContent='正在下载/加载本地 AI 模型（首次使用较慢）…';
+        const { pipeline } = await import('https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.8.1');
+        if(!segmenter) segmenter=await pipeline('background-removal','Xenova/modnet',{progress_callback:info=>{if(info.status==='progress'){const progress=info.progress||0;$('aiStatus').textContent=`正在加载 AI 模型：${Math.round(progress>1?progress:progress*100)}%`;}}});
+        $('aiStatus').textContent='正在识别人物与背景…';
+        const output=await segmenter(sourceUrl), mask=Array.isArray(output)?output[0]:output;
+        subjectMask=await mask.toCanvas(); $('aiStatus').textContent='AI 主体提取完成：背景将留空。'; return true;
+      } catch(error) {
+        console.warn('Subject extraction failed',error); subjectMask=null; $('aiStatus').textContent='AI 主体提取暂不可用，已回退为边缘背景识别。'; return false;
+      } finally { button.disabled=false; button.textContent='生成图纸'; }
+    }
     function voteMardColors(s) {
       // Render a small block of source samples for every output cell. We then
       // vote on real MARD codes per cell, instead of averaging blue/white/skin
@@ -95,11 +111,12 @@
       const ctx=detail.getContext('2d'); ctx.imageSmoothingEnabled=false;
       const scale=Math.max(detail.width/source.width,detail.height/source.height), w=source.width*scale, h=source.height*scale;
       ctx.drawImage(source,(detail.width-w)/2,(detail.height-h)/2,w,h);
-      const raw=ctx.getImageData(0,0,detail.width,detail.height).data, nearestCache=new Map(), globalVotes=Array(MARD221.length).fill(0), cellVotes=[];
+      let maskRaw=null; if(subjectMask) { const maskCanvas=document.createElement('canvas'); maskCanvas.width=detail.width; maskCanvas.height=detail.height; const maskCtx=maskCanvas.getContext('2d'); maskCtx.drawImage(subjectMask,(detail.width-w)/2,(detail.height-h)/2,w,h); maskRaw=maskCtx.getImageData(0,0,detail.width,detail.height).data; }
+      const raw=ctx.getImageData(0,0,detail.width,detail.height).data, nearestCache=new Map(), globalVotes=Array(MARD221.length).fill(0), cellVotes=[], foreground=[];
       const classify=(r,g,b)=>{const key=(r<<16)|(g<<8)|b; if(!nearestCache.has(key)) nearestCache.set(key,nearest([r,g,b],MARD221)); return nearestCache.get(key);};
-      for(let y=0;y<s.rows;y++) for(let x=0;x<s.cols;x++) { const votes=new Map();
-        for(let dy=0;dy<samples;dy++) for(let dx=0;dx<samples;dx++) { const pos=4*((y*samples+dy)*detail.width+x*samples+dx), code=classify(raw[pos],raw[pos+1],raw[pos+2]); votes.set(code,(votes.get(code)||0)+1); globalVotes[code]++; }
-        cellVotes.push(votes);
+      for(let y=0;y<s.rows;y++) for(let x=0;x<s.cols;x++) { const votes=new Map(); let covered=0;
+        for(let dy=0;dy<samples;dy++) for(let dx=0;dx<samples;dx++) { const pos=4*((y*samples+dy)*detail.width+x*samples+dx); if(maskRaw && Math.max(maskRaw[pos],maskRaw[pos+1],maskRaw[pos+2])<128) continue; covered++; const code=classify(raw[pos],raw[pos+1],raw[pos+2]); votes.set(code,(votes.get(code)||0)+1); globalVotes[code]++; }
+        cellVotes.push(votes); foreground.push(covered>=Math.max(1,Math.ceil(samples*samples*.18)));
       }
       // The color limit is also frequency based: retain the real MARD codes
       // seen most often in the image, rather than arbitrary median-cut boxes.
@@ -110,10 +127,10 @@
         // MARD code to the selected palette; no RGB averaging is introduced.
         let dominant=0, count=-1; votes.forEach((n,index)=>{if(n>count){dominant=index;count=n;}}); return nearest(MARD221[dominant].rgb,palette);
       });
-      return {palette,cells,background:findBackground(cells,s.cols,s.rows)};
+      return {palette,cells,background:subjectMask?foreground.map(value=>!value):findBackground(cells,s.cols,s.rows)};
     }
-    function makePattern() {
-      if(!source) return alert('请先上传一张图片。'); const s=readSettings(); $('cols').value=s.cols; $('rows').value=s.rows;
+    async function makePattern() {
+      if(!source) return alert('请先上传一张图片。'); await prepareSubjectMask(); const s=readSettings(); $('cols').value=s.cols; $('rows').value=s.rows;
       const {palette,cells,background}=voteMardColors(s); last={s,palette,cells,background}; draw();
     }
     function applyZoom() { const c=$('canvas'); c.style.width=`${c.width*zoom}px`; c.style.height=`${c.height*zoom}px`; $('zoomLabel').textContent=`${Math.round(zoom*100)}%`; }
@@ -123,7 +140,7 @@
       const counts=palette.map((_,i)=>cells.reduce((total,v,index)=>total+(!background[index]&&v===i?1:0),0)), beads=counts.reduce((a,b)=>a+b,0); $('summary').textContent=`${s.cols} × ${s.rows} 格 · ${beads} 颗拼豆 · MARD 221 实际使用 ${counts.filter(Boolean).length} 个色号`;
       $('legend').innerHTML=palette.map((p,i)=>counts[i]?`<div class="swatch"><i class="dot" style="background:${p.hex}"></i><span>${p.code} · ${counts[i]} 颗 · ${p.hex}</span></div>`:'').join(''); $('empty').hidden=true;$('result').hidden=false;applyZoom();
     }
-    $('file').addEventListener('change',e=>{const f=e.target.files[0];if(!f)return;const url=URL.createObjectURL(f);source=new Image();source.onload=()=>{URL.revokeObjectURL(url);makePattern()};source.src=url;});
+    $('file').addEventListener('change',e=>{const f=e.target.files[0];if(!f)return;if(sourceUrl)URL.revokeObjectURL(sourceUrl);sourceUrl=URL.createObjectURL(f);subjectMask=null;source=new Image();source.onload=()=>makePattern();source.src=sourceUrl;});
     $('generate').onclick=makePattern; $('grid').onchange=draw;
     $('zoomOut').onclick=()=>{zoom=clamp(zoom-.2,.3,3);applyZoom();}; $('zoomIn').onclick=()=>{zoom=clamp(zoom+.2,.3,3);applyZoom();}; $('zoomReset').onclick=()=>{zoom=1;applyZoom();};
     $('download').onclick=()=>{if(!last)return;const a=document.createElement('a');a.download=`拼豆图纸_${last.s.cols}x${last.s.rows}.png`;a.href=$('canvas').toDataURL('image/png');a.click();};
