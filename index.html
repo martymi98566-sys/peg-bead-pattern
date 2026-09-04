@@ -36,10 +36,10 @@
       <label for="file">图片</label><input id="file" type="file" accept="image/*" />
       <label>成品尺寸（m × n）</label>
       <div class="dimensions"><input id="cols" type="number" min="1" max="200" value="30" aria-label="横向 m" /><b class="times">×</b><input id="rows" type="number" min="1" max="200" value="30" aria-label="纵向 n" /></div>
-      <label for="palette">最多使用 MARD 色号</label><select id="palette"><option value="8">8 色</option><option value="12" selected>12 色</option><option value="16">16 色</option><option value="24">24 色</option><option value="32">32 色</option></select>
+      <label>使用色号</label><div class="hint" style="margin:0">自动精简：按主体画面的颜色分布选择尽量少的 MARD 色号。</div>
       <div class="checks"><label><input id="grid" type="checkbox" checked /> 显示网格线</label><label>背景区域自动留空，不显示色号或计入拼豆数量</label></div>
       <button id="generate" class="primary">生成图纸</button>
-      <p class="hint">m 为横向豆子数，n 为纵向豆子数。每格会以原图区域内票数最多的 MARD 色号决定颜色，不使用平均混色。</p>
+      <p class="hint">m 为横向豆子数，n 为纵向豆子数。每格以原图区域内票数最多的 MARD 色号决定颜色，不使用平均混色；边缘连通的近白背景会自动留空。</p>
     </aside>
     <section class="card">
       <div id="empty" class="empty"><div><h2>等待上传图片</h2><p>选择一张 JPG、PNG、WebP 或 GIF 图片开始。</p></div></div>
@@ -52,7 +52,7 @@
   <script>
     const $ = id => document.getElementById(id); let source = null, last = null, zoom = 1;
     const clamp = (v,a,b) => Math.max(a,Math.min(b,v));
-    function readSettings() { return { cols:clamp(+$('cols').value||30,1,200), rows:clamp(+$('rows').value||30,1,200), count:+$('palette').value, grid:$('grid').checked }; }
+    function readSettings() { return { cols:clamp(+$('cols').value||30,1,200), rows:clamp(+$('rows').value||30,1,200), grid:$('grid').checked }; }
     // MARD 221 standard palette: A–H and M series. HEX is a screen reference;
     // the code is the one used when buying and placing real beads.
     function toHsl([r,g,b]) { r/=255;g/=255;b/=255; const max=Math.max(r,g,b),min=Math.min(r,g,b),l=(max+min)/2,delta=max-min; if(!delta)return [0,0,l]; let h=max===r?(g-b)/delta+(g<b?6:0):max===g?(b-r)/delta+2:(r-g)/delta+4; return [h/6,delta/(1-Math.abs(2*l-1)),l]; }
@@ -77,14 +77,24 @@
         if(sourceHsl[1]>.14) { const hue=Math.min(Math.abs(sourceHsl[0]-targetHsl[0]),1-Math.abs(sourceHsl[0]-targetHsl[0])); n+=42000*(sourceHsl[1]-targetHsl[1])**2+360000*hue**2*(.5+sourceHsl[1]); }
         if(n<d){d=n;best=i;} }); return best;
     }
+    function dominantVote(votes) { let choice=0, most=-1; votes.forEach((n,index)=>{if(n>most){choice=index;most=n;}}); return choice; }
     function findBackground(cells,cols,rows) {
-      // Select the dominant color along the image edge, then blank only its
-      // connected component. Enclosed white clothing/highlights remain beads.
+      // Find the dominant edge shade, then flood through visually equivalent
+      // near-white shades. JPEG/anti-aliasing often turns a white backdrop into
+      // H1/H18/H19-sized flecks; exact color matching leaves those behind.
       const edge=[]; for(let x=0;x<cols;x++) edge.push(x,(rows-1)*cols+x); for(let y=1;y<rows-1;y++) edge.push(y*cols,y*cols+cols-1);
       const votes=new Map(); edge.forEach(i=>votes.set(cells[i],(votes.get(cells[i])||0)+1)); let color=cells[0], most=-1; votes.forEach((n,key)=>{if(n>most){most=n;color=key;}});
-      const background=Array(cells.length).fill(false), queue=[]; edge.forEach(i=>{if(cells[i]===color&&!background[i]){background[i]=true;queue.push(i);}});
-      while(queue.length) { const i=queue.pop(),x=i%cols,y=Math.floor(i/cols); for(const [dx,dy] of [[1,0],[-1,0],[0,1],[0,-1]]) { const nx=x+dx,ny=y+dy,n=ny*cols+nx; if(nx>=0&&nx<cols&&ny>=0&&ny<rows&&!background[n]&&cells[n]===color){background[n]=true;queue.push(n);} } }
+      const base=MARD221[color].rgb, isBackgroundLike=index=>{const rgb=MARD221[index].rgb,hsl=MARD221[index].hsl, distance=(rgb[0]-base[0])**2+(rgb[1]-base[1])**2+(rgb[2]-base[2])**2; return hsl[2]>.89 && distance<1100;};
+      const background=Array(cells.length).fill(false), queue=[]; edge.forEach(i=>{if(isBackgroundLike(cells[i])&&!background[i]){background[i]=true;queue.push(i);}});
+      while(queue.length) { const i=queue.pop(),x=i%cols,y=Math.floor(i/cols); for(const [dx,dy] of [[1,0],[-1,0],[0,1],[0,-1]]) { const nx=x+dx,ny=y+dy,n=ny*cols+nx; if(nx>=0&&nx<cols&&ny>=0&&ny<rows&&!background[n]&&isBackgroundLike(cells[n])){background[n]=true;queue.push(n);} } }
       return background;
+    }
+    function selectAutomaticPalette(votes) {
+      const ranked=votes.map((count,index)=>({index,count})).filter(x=>x.count).sort((a,b)=>b.count-a.count), total=ranked.reduce((sum,x)=>sum+x.count,0);
+      if(!total) return [nearest([255,255,255],MARD221)];
+      let covered=0, limit=0;
+      while(limit<ranked.length && (limit<6 || (covered/total<.90 && limit<12))) { covered+=ranked[limit].count; limit++; }
+      return ranked.slice(0,limit).map(x=>x.index);
     }
     function voteMardColors(s) {
       // Render a small block of source samples for every output cell. We then
@@ -101,16 +111,17 @@
         for(let dy=0;dy<samples;dy++) for(let dx=0;dx<samples;dx++) { const pos=4*((y*samples+dy)*detail.width+x*samples+dx), code=classify(raw[pos],raw[pos+1],raw[pos+2]); votes.set(code,(votes.get(code)||0)+1); globalVotes[code]++; }
         cellVotes.push(votes);
       }
-      // The color limit is also frequency based: retain the real MARD codes
-      // seen most often in the image, rather than arbitrary median-cut boxes.
-      const chosenIndexes=globalVotes.map((votes,index)=>({index,votes})).sort((a,b)=>b.votes-a.votes).slice(0,s.count).map(x=>x.index), palette=chosenIndexes.map(i=>MARD221[i]), paletteIndex=new Map(chosenIndexes.map((v,i)=>[v,i]));
-      const cells=cellVotes.map(votes=>{ let best=-1, bestVotes=-1; votes.forEach((n,index)=>{if(paletteIndex.has(index)&&n>bestVotes){best=index;bestVotes=n;}});
-        if(best>=0) return paletteIndex.get(best);
-        // A rare-color-only cell has no allowed code. Remap its dominant real
-        // MARD code to the selected palette; no RGB averaging is introduced.
-        let dominant=0, count=-1; votes.forEach((n,index)=>{if(n>count){dominant=index;count=n;}}); return nearest(MARD221[dominant].rgb,palette);
-      });
-      return {palette,cells,background:findBackground(cells,s.cols,s.rows)};
+      // Detect the background before selecting colors. Otherwise slightly
+      // different whites around the edge (H18/H19) consume palette slots and
+      // can leak into the face after remapping.
+      const rawCells=cellVotes.map(dominantVote), background=findBackground(rawCells,s.cols,s.rows), foregroundVotes=Array(MARD221.length).fill(0);
+      cellVotes.forEach((votes,position)=>{if(!background[position]) votes.forEach((n,index)=>foregroundVotes[index]+=n);});
+      // Keep a compact automatic palette: at least six colors for important
+      // details, then enough frequent colors to cover 90% of the subject, up
+      // to twelve. Rare shades are mapped to their nearest retained MARD code.
+      const chosenIndexes=selectAutomaticPalette(foregroundVotes), palette=chosenIndexes.map(i=>MARD221[i]), paletteIndex=new Map(chosenIndexes.map((v,i)=>[v,i]));
+      const cells=cellVotes.map(votes=>{const mapped=Array(palette.length).fill(0); votes.forEach((n,index)=>{const target=paletteIndex.has(index)?paletteIndex.get(index):nearest(MARD221[index].rgb,palette); mapped[target]+=n;}); return dominantVote(mapped);});
+      return {palette,cells,background};
     }
     function makePattern() {
       if(!source) return alert('请先上传一张图片。'); const s=readSettings(); $('cols').value=s.cols; $('rows').value=s.rows;
